@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Gemini Live Reliability Lab</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Gemini Live Reliability Lab</h1>
+      <div id="status-bar">
+        <span id="conn-status" class="badge">disconnected</span>
+        <span id="mode-badge" class="badge">--</span>
+        <span id="rtt-badge" class="badge">rtt --</span>
+        <span id="session-badge" class="badge">no session</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Session</h2>
+        <div class="row">
+          <button id="btn-connect">Connect</button>
+          <button id="btn-disconnect" disabled>Disconnect</button>
+          <button id="btn-new-session">New session</button>
+        </div>
+        <div class="row">
+          <label>Session ID:
+            <input id="session-input" type="text" placeholder="(auto)" />
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Live Stream</h2>
+        <video id="preview" autoplay muted playsinline></video>
+        <div class="row">
+          <button id="btn-start-media">Start camera + mic</button>
+          <button id="btn-stop-media" disabled>Stop</button>
+        </div>
+        <div class="row" id="capture-info">capture: idle</div>
+      </section>
+
+      <section class="panel">
+        <h2>Photo Fallback</h2>
+        <p class="hint">Sends one photo + text question to <code>POST /fallback/photo</code>.</p>
+        <div class="row">
+          <button id="btn-snap-ask">Snap &amp; ask</button>
+          <input id="photo-question" type="text" placeholder="What is this?" />
+        </div>
+        <div id="photo-reply" class="reply"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Failure Injection</h2>
+        <div class="row">
+          <label><input type="checkbox" id="inj-drop-frames" /> drop 50% of outbound frames</label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="inj-stall-pongs" /> stall pongs (kill heartbeat)</label>
+        </div>
+        <div class="row">
+          <button id="btn-kill-socket">Kill socket</button>
+          <button id="btn-force-photo">Force photo mode</button>
+          <button id="btn-force-hd">Force HD</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

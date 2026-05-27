@@ -15,6 +15,9 @@ export interface LiveSetup {
     systemInstruction?: { parts: Array<{ text: string }> };
     sessionResumption?: { handle?: string };
     contextWindowCompression?: { slidingWindow: object; triggerTokens?: number };
+    realtimeInputConfig?: {
+      automaticActivityDetection?: { disabled?: boolean; startOfSpeechSensitivity?: string; endOfSpeechSensitivity?: string };
+    };
   };
 }
 

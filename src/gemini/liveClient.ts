@@ -76,25 +76,36 @@ export class LiveClient {
 
   private sendSetup(): void {
     if (!this.ws) return;
-    const setup: LiveSetup = {
-      setup: {
-        model: `models/${this.opts.config.GEMINI_LIVE_MODEL}`,
-        generationConfig: {
-          responseModalities: ['AUDIO'],
-        },
-        sessionResumption: this.opts.resumptionHandle
-          ? { handle: this.opts.resumptionHandle }
-          : {},
-        contextWindowCompression: {
-          slidingWindow: {},
-          triggerTokens: this.opts.config.CONTEXT_COMPRESS_TRIGGER_TOKENS,
-        },
-        ...(this.opts.systemInstruction
-          ? { systemInstruction: { parts: [{ text: this.opts.systemInstruction }] } }
-          : {}),
+    // Some Live-capable models (notably the gemini-2.5-flash-native-audio family) do not
+    // support sessionResumption or contextWindowCompression and will respond with
+    // close code 1011 ("Internal error encountered.") on the first turn. Gate them
+    // behind env flags so the lab works out-of-the-box on the native-audio model.
+    const setupInner: NonNullable<LiveSetup>['setup'] = {
+      model: `models/${this.opts.config.GEMINI_LIVE_MODEL}`,
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+      },
+      realtimeInputConfig: {
+        // Manual VAD: client sends explicit activityStart/activityEnd around each turn.
+        // More reliable than auto VAD for noisy environments and easier to demo.
+        automaticActivityDetection: { disabled: true },
       },
     };
-    this.ws.send(JSON.stringify(setup));
+    if (this.opts.config.ENABLE_SESSION_RESUMPTION) {
+      setupInner.sessionResumption = this.opts.resumptionHandle
+        ? { handle: this.opts.resumptionHandle }
+        : {};
+    }
+    if (this.opts.config.ENABLE_CONTEXT_COMPRESSION) {
+      setupInner.contextWindowCompression = {
+        slidingWindow: {},
+        triggerTokens: this.opts.config.CONTEXT_COMPRESS_TRIGGER_TOKENS,
+      };
+    }
+    if (this.opts.systemInstruction) {
+      setupInner.systemInstruction = { parts: [{ text: this.opts.systemInstruction }] };
+    }
+    this.ws.send(JSON.stringify({ setup: setupInner }));
   }
 
   private startHeartbeat(): void {

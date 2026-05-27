@@ -18,7 +18,10 @@ const state = {
   media: null,
   captureTimer: null,
   audioCtx: null,
-  mediaRecorder: null,
+  audioInCtx: null,
+  audioInSource: null,
+  audioInProcessor: null,
+  talking: false,
   mode: 'HD_VIDEO',
   capture: { maxFps: 1, audioOnly: false, photoMode: false },
   inject: { dropFrames: false, stallPongs: false },
@@ -147,14 +150,21 @@ function handleServerMessage(data) {
   }
   if (msg.serverContent) {
     const parts = msg.serverContent.modelTurn?.parts ?? [];
+    let audioBytes = 0;
     for (const p of parts) {
       if (p.text) log('model.text', p.text);
       if (p.inlineData?.mimeType?.startsWith('audio/')) {
+        audioBytes += p.inlineData.data.length;
         playPcm(p.inlineData.data);
       }
     }
+    if (audioBytes > 0) log('model.audio.chunk', { base64Bytes: audioBytes });
     if (msg.serverContent.turnComplete) log('turn.complete');
+    if (msg.serverContent.interrupted) log('turn.interrupted');
   }
+  if (msg.setupComplete) log('upstream.setupComplete');
+  if (msg.goAway) log('upstream.goAway', msg.goAway);
+  if (msg.sessionResumptionUpdate) log('upstream.handle.updated', { resumable: msg.sessionResumptionUpdate.resumable });
   if (msg.serverContent || msg.setupComplete || msg.goAway || msg.sessionResumptionUpdate) {
     // Already logged or handled.
   }
@@ -173,17 +183,36 @@ async function startMedia() {
   $('preview').srcObject = state.media;
   $('btn-start-media').disabled = true;
   $('btn-stop-media').disabled = false;
+  $('btn-talk').disabled = false;
   applyCaptureHint();
 }
 
 function stopMedia() {
   if (state.captureTimer) { clearInterval(state.captureTimer); state.captureTimer = null; }
-  if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') state.mediaRecorder.stop();
+  stopTalking();
+  stopAudioStreaming();
   state.media?.getTracks().forEach((t) => t.stop());
   state.media = null;
   $('btn-start-media').disabled = false;
   $('btn-stop-media').disabled = true;
+  $('btn-talk').disabled = true;
   $('capture-info').textContent = 'capture: idle';
+}
+
+function startTalking() {
+  if (state.talking) return;
+  state.talking = true;
+  setBadge($('talk-state'), 'talking', 'warn');
+  send({ type: 'realtimeInput', payload: { activityStart: {} } });
+  log('talk.start');
+}
+
+function stopTalking() {
+  if (!state.talking) return;
+  state.talking = false;
+  setBadge($('talk-state'), 'idle');
+  send({ type: 'realtimeInput', payload: { activityEnd: {} } });
+  log('talk.end');
 }
 
 function applyCaptureHint() {
@@ -230,31 +259,54 @@ function captureFrame() {
 }
 
 function startAudioStreaming() {
-  if (state.mediaRecorder || !state.media) return;
+  if (state.audioInCtx || !state.media) return;
   const audioTrack = state.media.getAudioTracks()[0];
   if (!audioTrack) return;
   const audioStream = new MediaStream([audioTrack]);
-  // 250ms chunks of webm/opus — small enough to interactively stream.
-  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-  const mr = new MediaRecorder(audioStream, { mimeType: mime, audioBitsPerSecond: 32_000 });
-  mr.ondataavailable = async (ev) => {
-    if (!ev.data || !ev.data.size) return;
-    const buf = await ev.data.arrayBuffer();
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+
+  // Gemini Live requires raw 16-bit PCM, 16kHz, mono, little-endian.
+  // Creating the AudioContext at 16000 Hz makes the browser resample MediaStream input to 16kHz.
+  const audioCtx = new AudioContext({ sampleRate: 16000 });
+  const source = audioCtx.createMediaStreamSource(audioStream);
+  const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+  processor.onaudioprocess = (e) => {
+    if (!state.talking) return; // Only stream while push-to-talk is held.
+    const input = e.inputBuffer.getChannelData(0);
+    const pcm16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    const bytes = new Uint8Array(pcm16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const base64 = btoa(binary);
     send({
       type: 'realtimeInput',
-      payload: { audio: { mimeType: mime, data: base64 } },
+      payload: { audio: { mimeType: 'audio/pcm;rate=16000', data: base64 } },
     });
   };
-  mr.start(250);
-  state.mediaRecorder = mr;
+
+  source.connect(processor);
+  processor.connect(audioCtx.destination);
+
+  state.audioInCtx = audioCtx;
+  state.audioInSource = source;
+  state.audioInProcessor = processor;
+  log('audio.streaming.start', { sampleRate: audioCtx.sampleRate });
 }
 
 function stopAudioStreaming() {
-  if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
-    state.mediaRecorder.stop();
+  if (state.audioInProcessor) {
+    state.audioInProcessor.disconnect();
+    state.audioInProcessor.onaudioprocess = null;
   }
-  state.mediaRecorder = null;
+  if (state.audioInSource) state.audioInSource.disconnect();
+  if (state.audioInCtx) state.audioInCtx.close();
+  state.audioInProcessor = null;
+  state.audioInSource = null;
+  state.audioInCtx = null;
 }
 
 function playPcm(base64) {
@@ -319,6 +371,13 @@ $('btn-new-session').addEventListener('click', () => {
 });
 $('btn-start-media').addEventListener('click', () => startMedia());
 $('btn-stop-media').addEventListener('click', () => stopMedia());
+
+const talkBtn = $('btn-talk');
+talkBtn.addEventListener('mousedown', startTalking);
+talkBtn.addEventListener('mouseup', stopTalking);
+talkBtn.addEventListener('mouseleave', stopTalking);
+talkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startTalking(); });
+talkBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopTalking(); });
 $('btn-snap-ask').addEventListener('click', () => snapAndAsk());
 $('btn-kill-socket').addEventListener('click', () => {
   if (state.ws) state.ws.close(4001, 'manual-kill');

@@ -85,11 +85,9 @@ export class LiveClient {
       generationConfig: {
         responseModalities: ['AUDIO'],
       },
-      realtimeInputConfig: {
-        // Manual VAD: client sends explicit activityStart/activityEnd around each turn.
-        // More reliable than auto VAD for noisy environments and easier to demo.
-        automaticActivityDetection: { disabled: true },
-      },
+      // Automatic voice activity detection - Gemini infers turn boundaries from
+      // silence in the audio stream. This is the default; we make it explicit
+      // so it's easy to swap to manual VAD via `automaticActivityDetection.disabled`.
     };
     if (this.opts.config.ENABLE_SESSION_RESUMPTION) {
       setupInner.sessionResumption = this.opts.resumptionHandle

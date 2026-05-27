@@ -21,7 +21,9 @@ const state = {
   audioInCtx: null,
   audioInSource: null,
   audioInProcessor: null,
-  talking: false,
+  audioOutCtx: null,
+  audioOutNextStart: 0,
+  audioOutSources: [],
   mode: 'HD_VIDEO',
   capture: { maxFps: 1, audioOnly: false, photoMode: false },
   inject: { dropFrames: false, stallPongs: false },
@@ -160,7 +162,10 @@ function handleServerMessage(data) {
     }
     if (audioBytes > 0) log('model.audio.chunk', { base64Bytes: audioBytes });
     if (msg.serverContent.turnComplete) log('turn.complete');
-    if (msg.serverContent.interrupted) log('turn.interrupted');
+    if (msg.serverContent.interrupted) {
+      log('turn.interrupted');
+      interruptPlayback();
+    }
   }
   if (msg.setupComplete) log('upstream.setupComplete');
   if (msg.goAway) log('upstream.goAway', msg.goAway);
@@ -183,36 +188,20 @@ async function startMedia() {
   $('preview').srcObject = state.media;
   $('btn-start-media').disabled = true;
   $('btn-stop-media').disabled = false;
-  $('btn-talk').disabled = false;
+  $('btn-interrupt').disabled = false;
   applyCaptureHint();
 }
 
 function stopMedia() {
   if (state.captureTimer) { clearInterval(state.captureTimer); state.captureTimer = null; }
-  stopTalking();
   stopAudioStreaming();
+  interruptPlayback();
   state.media?.getTracks().forEach((t) => t.stop());
   state.media = null;
   $('btn-start-media').disabled = false;
   $('btn-stop-media').disabled = true;
-  $('btn-talk').disabled = true;
+  $('btn-interrupt').disabled = true;
   $('capture-info').textContent = 'capture: idle';
-}
-
-function startTalking() {
-  if (state.talking) return;
-  state.talking = true;
-  setBadge($('talk-state'), 'talking', 'warn');
-  send({ type: 'realtimeInput', payload: { activityStart: {} } });
-  log('talk.start');
-}
-
-function stopTalking() {
-  if (!state.talking) return;
-  state.talking = false;
-  setBadge($('talk-state'), 'idle');
-  send({ type: 'realtimeInput', payload: { activityEnd: {} } });
-  log('talk.end');
 }
 
 function applyCaptureHint() {
@@ -271,7 +260,6 @@ function startAudioStreaming() {
   const processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
   processor.onaudioprocess = (e) => {
-    if (!state.talking) return; // Only stream while push-to-talk is held.
     const input = e.inputBuffer.getChannelData(0);
     const pcm16 = new Int16Array(input.length);
     for (let i = 0; i < input.length; i++) {
@@ -294,6 +282,7 @@ function startAudioStreaming() {
   state.audioInCtx = audioCtx;
   state.audioInSource = source;
   state.audioInProcessor = processor;
+  setBadge($('talk-state'), 'listening: on', 'ok');
   log('audio.streaming.start', { sampleRate: audioCtx.sampleRate });
 }
 
@@ -307,22 +296,56 @@ function stopAudioStreaming() {
   state.audioInProcessor = null;
   state.audioInSource = null;
   state.audioInCtx = null;
+  setBadge($('talk-state'), 'listening: off');
 }
 
+/**
+ * Play a chunk of 24kHz 16-bit LE PCM. Chunks arrive 10-30ms apart while Gemini
+ * synthesizes. We schedule each one to start exactly when the previous chunk
+ * ends so they play seamlessly. Calling src.start() with no argument plays them
+ * all simultaneously, producing the gibberish you heard.
+ */
 function playPcm(base64) {
-  if (!state.audioCtx) state.audioCtx = new AudioContext({ sampleRate: 24000 });
-  const ctx = state.audioCtx;
+  if (!state.audioOutCtx) {
+    state.audioOutCtx = new AudioContext();
+    state.audioOutNextStart = 0;
+  }
+  const ctx = state.audioOutCtx;
   const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-  // Gemini Live audio is 16-bit PCM, little-endian, 24kHz.
-  const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  if (bytes.length < 2) return; // tiny end-of-stream markers
+
+  // Bytes may not be 2-byte aligned for the underlying ArrayBuffer view, so copy.
+  const aligned = new Uint8Array(bytes.length);
+  aligned.set(bytes);
+  const samples = new Int16Array(aligned.buffer, aligned.byteOffset, Math.floor(aligned.byteLength / 2));
   const float = new Float32Array(samples.length);
   for (let i = 0; i < samples.length; i++) float[i] = samples[i] / 32768;
-  const buf = ctx.createBuffer(1, float.length, 24000);
+
+  const sampleRate = 24000;
+  const buf = ctx.createBuffer(1, float.length, sampleRate);
   buf.copyToChannel(float, 0);
+
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(ctx.destination);
-  src.start();
+
+  const now = ctx.currentTime;
+  const startAt = Math.max(state.audioOutNextStart, now + 0.02); // small safety margin
+  src.start(startAt);
+  state.audioOutNextStart = startAt + buf.duration;
+  state.audioOutSources.push(src);
+  src.onended = () => {
+    state.audioOutSources = state.audioOutSources.filter((s) => s !== src);
+  };
+}
+
+/** Stop any queued audio playback (e.g. on barge-in / interrupt). */
+function interruptPlayback() {
+  for (const src of state.audioOutSources) {
+    try { src.stop(); } catch { /* may have already ended */ }
+  }
+  state.audioOutSources = [];
+  state.audioOutNextStart = 0;
 }
 
 async function snapAndAsk() {
@@ -371,13 +394,10 @@ $('btn-new-session').addEventListener('click', () => {
 });
 $('btn-start-media').addEventListener('click', () => startMedia());
 $('btn-stop-media').addEventListener('click', () => stopMedia());
-
-const talkBtn = $('btn-talk');
-talkBtn.addEventListener('mousedown', startTalking);
-talkBtn.addEventListener('mouseup', stopTalking);
-talkBtn.addEventListener('mouseleave', stopTalking);
-talkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startTalking(); });
-talkBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopTalking(); });
+$('btn-interrupt').addEventListener('click', () => {
+  interruptPlayback();
+  log('user.interrupted');
+});
 $('btn-snap-ask').addEventListener('click', () => snapAndAsk());
 $('btn-kill-socket').addEventListener('click', () => {
   if (state.ws) state.ws.close(4001, 'manual-kill');

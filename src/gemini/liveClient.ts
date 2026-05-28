@@ -1,16 +1,29 @@
 import { WebSocket as WsWebSocket } from 'ws';
 import type { LiveSetup, ServerMessage } from './liveTypes.js';
+import type { Turn } from '../session/Session.js';
 import { NativeHeartbeat } from '../reliability/heartbeat.js';
 import { logger } from '../util/logger.js';
 import type { Config } from '../config.js';
 
-const LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+const DEFAULT_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+// Test-only escape hatch: lets integration tests point LiveClient at a mock WS server
+// without threading an option through every caller. Read per-connect so tests can set
+// it in `beforeEach`. Never set in production.
+function getLiveUrl(): string {
+  return process.env.GEMINI_LIVE_URL_OVERRIDE || DEFAULT_LIVE_URL;
+}
 
 export interface LiveClientOptions {
   config: Config;
   sessionId: string;
   resumptionHandle?: string;
   systemInstruction?: string;
+  /**
+   * Transcript turns to replay as a single `clientContent` batch right after `setupComplete`.
+   * Used to seed the model with recent conversation context on reconnect when the model
+   * doesn't support `sessionResumption`. `turnComplete:false` so Gemini doesn't auto-respond.
+   */
+  replayTurns?: Turn[];
   onMessage: (msg: ServerMessage, raw: Buffer | string) => void;
   onClose: (code: number, reason: string) => void;
   onOpen: () => void;
@@ -34,7 +47,10 @@ export class LiveClient {
   constructor(private readonly opts: LiveClientOptions) {}
 
   connect(): void {
-    const url = `${LIVE_URL}?key=${this.opts.config.GEMINI_API_KEY}`;
+    const base = getLiveUrl();
+    const url = base.startsWith('ws://') || base.includes('localhost') || base.includes('127.0.0.1')
+      ? base
+      : `${base}?key=${this.opts.config.GEMINI_API_KEY}`;
     logger.info({ sessionId: this.opts.sessionId, hasHandle: !!this.opts.resumptionHandle }, 'gemini.connect');
 
     this.ws = new WsWebSocket(url);
@@ -52,6 +68,7 @@ export class LiveClient {
         if ('setupComplete' in parsed) {
           this.setupAcked = true;
           logger.debug({ sessionId: this.opts.sessionId }, 'gemini.setupComplete');
+          this.sendReplayIfAny();
         }
         this.opts.onMessage(parsed, data as Buffer);
       } catch (err) {
@@ -104,6 +121,26 @@ export class LiveClient {
       setupInner.systemInstruction = { parts: [{ text: this.opts.systemInstruction }] };
     }
     this.ws.send(JSON.stringify({ setup: setupInner }));
+  }
+
+  private sendReplayIfAny(): void {
+    const turns = this.opts.replayTurns;
+    if (!turns || turns.length === 0 || !this.ws) return;
+    const payload = {
+      clientContent: {
+        turns: turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
+        turnComplete: false,
+      },
+    };
+    try {
+      this.ws.send(JSON.stringify(payload));
+      logger.info(
+        { sessionId: this.opts.sessionId, replayTurns: turns.length },
+        'gemini.replay.sent',
+      );
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, 'gemini.replay.send-failed');
+    }
   }
 
   private startHeartbeat(): void {

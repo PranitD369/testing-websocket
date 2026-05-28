@@ -53,7 +53,7 @@ export async function registerFallbackRoute(app: FastifyInstance, deps: Fallback
       return { error: 'photo (file) is required' };
     }
 
-    const session = sessionId ? deps.sessions.get(sessionId) : undefined;
+    const session = sessionId ? await deps.sessions.getOrLoad(sessionId) : undefined;
     const transcriptSummary = session?.transcriptSummary();
 
     try {

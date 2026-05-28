@@ -59,10 +59,23 @@ export class UpstreamSupervisor {
   }
 
   private buildLiveOpts(extra: Partial<LiveClientOptions>): LiveClientOptions {
+    const seed = this.opts.session.buildSeedContext(this.opts.config.CONTEXT_REPLAY_TAIL_TURNS);
+    if (seed.summary || seed.replay.length > 0) {
+      logger.info(
+        {
+          sessionId: this.opts.session.id,
+          summaryChars: seed.summary.length,
+          replayTurns: seed.replay.length,
+        },
+        'upstream.seed.prepared',
+      );
+    }
     return {
       config: this.opts.config,
       sessionId: this.opts.session.id,
       resumptionHandle: this.opts.session.resumptionHandle,
+      systemInstruction: seed.summary || undefined,
+      replayTurns: seed.replay.length > 0 ? seed.replay : undefined,
       onMessage: (msg, raw) => this.handleMessage(msg, raw),
       onClose: (code, reason) => this.handleClose(code, reason),
       onOpen: () => {},
@@ -124,7 +137,7 @@ export class UpstreamSupervisor {
     } else if ('sessionResumptionUpdate' in msg) {
       const { newHandle, resumable } = msg.sessionResumptionUpdate;
       if (newHandle && resumable !== false) {
-        this.opts.session.resumptionHandle = newHandle;
+        this.opts.session.setResumptionHandle(newHandle);
         logger.debug({ sessionId: this.opts.session.id }, 'upstream.handle.updated');
       }
     } else if ('goAway' in msg) {

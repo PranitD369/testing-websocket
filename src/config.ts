@@ -19,6 +19,11 @@ const schema = z.object({
   // Default off so the lab works on the current generally-available model.
   ENABLE_SESSION_RESUMPTION: z.coerce.boolean().default(false),
   ENABLE_CONTEXT_COMPRESSION: z.coerce.boolean().default(false),
+  // Postgres-backed durable session store. Leave empty to fall back to in-memory only.
+  DATABASE_URL: z.string().url().optional(),
+  DB_POOL_MAX: z.coerce.number().int().positive().default(10),
+  // Hybrid context replay: how many tail turns to replay verbatim; everything older is summarized.
+  CONTEXT_REPLAY_TAIL_TURNS: z.coerce.number().int().nonnegative().default(3),
 });
 
 export type Config = z.infer<typeof schema>;

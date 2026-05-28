@@ -16,14 +16,31 @@ export interface WsRouteDeps {
  *   inject       - csv of failure-injection toggles (debug only): killGemini, goAway, stallPongs
  */
 export async function registerWsRoute(app: FastifyInstance, deps: WsRouteDeps): Promise<void> {
-  app.get('/ws', { websocket: true }, (socket, req) => {
+  app.get('/ws', { websocket: true }, async (socket, req) => {
     const url = new URL(req.url ?? '/ws', 'http://localhost');
     const sessionId = url.searchParams.get('sessionId') ?? undefined;
     const inject = new Set((url.searchParams.get('inject') ?? '').split(',').filter(Boolean));
 
-    const session = deps.sessions.getOrCreate(sessionId);
+    let session;
+    try {
+      session = await deps.sessions.getOrCreate(sessionId);
+    } catch (err) {
+      logger.error({ err: (err as Error).message }, 'ws.session.load-failed');
+      try {
+        socket.close(1011, 'session-load-failed');
+      } catch {
+        /* noop */
+      }
+      return;
+    }
+
     logger.info(
-      { sessionId: session.id, resuming: !!session.resumptionHandle, inject: Array.from(inject) },
+      {
+        sessionId: session.id,
+        resuming: !!session.resumptionHandle,
+        turns: session.transcript.length,
+        inject: Array.from(inject),
+      },
       'ws.connect',
     );
 

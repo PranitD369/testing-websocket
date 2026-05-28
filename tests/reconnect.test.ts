@@ -2,12 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { startMockGemini, type MockGeminiHandle } from './fixtures/mockGemini.js';
 import { Session } from '../src/session/Session.js';
 import { UpstreamSupervisor } from '../src/reliability/reconnect.js';
+import { LiveClient } from '../src/gemini/liveClient.js';
 import type { Config } from '../src/config.js';
 
-function makeConfig(liveUrl: string): Config {
-  // The LiveClient hardcodes the Google URL, so we monkey-patch via env where possible.
-  // Instead we point at the mock by overriding the module's URL constant before import.
-  // (See note in the test below — we use a wrapper config.)
+function makeConfig(): Config {
   return {
     GEMINI_API_KEY: 'test-key',
     PORT: 0,
@@ -22,34 +20,24 @@ function makeConfig(liveUrl: string): Config {
     DEGRADATION_RTT_PHOTO_MS: 1500,
     SESSION_TTL_HOURS: 1,
     CONTEXT_COMPRESS_TRIGGER_TOKENS: 25_000,
-    __overrideLiveUrl: liveUrl,
-  } as unknown as Config;
+    ENABLE_SESSION_RESUMPTION: false,
+    ENABLE_CONTEXT_COMPRESSION: false,
+    DB_POOL_MAX: 10,
+    CONTEXT_REPLAY_TAIL_TURNS: 3,
+  } as Config;
 }
 
 let mock: MockGeminiHandle;
 
-beforeEach(async () => {
-  // We need LiveClient to point at the mock; since its URL is hardcoded, the test
-  // works at the integration boundary: it verifies UpstreamSupervisor reacts correctly
-  // when handed a LiveClient pointed at the mock. We do that by spawning the mock and
-  // overriding the WebSocket-URL the LiveClient constructs.
-  process.env.MOCK_GEMINI_URL = '';
-});
-
 afterEach(async () => {
   if (mock) await mock.close();
+  delete process.env.GEMINI_LIVE_URL_OVERRIDE;
 });
-
-/**
- * Note: full reconnect-to-mock integration requires LiveClient to accept an override URL.
- * For unit-level coverage of UpstreamSupervisor's reconnection accounting and resumption-handle
- * persistence, the dedicated unit tests below patch LiveClient via a wrapper.
- */
 
 describe('UpstreamSupervisor (logic)', () => {
   it('persists resumption handle from sessionResumptionUpdate', () => {
     const session = new Session('s1');
-    const config = makeConfig('ws://unused');
+    const config = makeConfig();
     const sup = new UpstreamSupervisor({
       config,
       session,
@@ -58,18 +46,13 @@ describe('UpstreamSupervisor (logic)', () => {
       onReady: () => {},
     });
 
-    // Reach into the supervisor's handler indirectly: call the public message handler shape.
-    // Since handleMessage is private, exercise it through a test-only injection:
-    // we cast and invoke for unit-test convenience.
     const sup2 = sup as unknown as { handleMessage: (m: object) => void };
     sup2.handleMessage({ sessionResumptionUpdate: { newHandle: 'h-1', resumable: true } });
     expect(session.resumptionHandle).toBe('h-1');
 
-    // Non-resumable update should NOT overwrite.
     sup2.handleMessage({ sessionResumptionUpdate: { newHandle: 'h-2', resumable: false } });
     expect(session.resumptionHandle).toBe('h-1');
 
-    // Newer resumable update overwrites.
     sup2.handleMessage({ sessionResumptionUpdate: { newHandle: 'h-3', resumable: true } });
     expect(session.resumptionHandle).toBe('h-3');
   });
@@ -107,5 +90,62 @@ describe('mockGemini integration', () => {
     expect(goAway).toBeTruthy();
     expect(goAway?.goAway.timeLeft).toBe('2s');
     ws.close();
+  });
+});
+
+describe('LiveClient context replay', () => {
+  it('sends replay turns as a clientContent batch after setupComplete', async () => {
+    mock = await startMockGemini();
+    process.env.GEMINI_LIVE_URL_OVERRIDE = mock.url;
+
+    const lc = new LiveClient({
+      config: makeConfig(),
+      sessionId: 's-replay',
+      replayTurns: [
+        { role: 'user', text: 'what is this?', at: 1 },
+        { role: 'model', text: 'a capacitor', at: 2 },
+        { role: 'user', text: 'is it broken?', at: 3 },
+      ],
+      onMessage: () => {},
+      onClose: () => {},
+      onOpen: () => {},
+      onError: () => {},
+    });
+    lc.connect();
+
+    // Wait for setup + replay round-trip.
+    await new Promise((res) => setTimeout(res, 150));
+
+    const clientContents = mock.received.filter((m) => 'clientContent' in m) as Array<{
+      clientContent: { turns: Array<{ role: string; parts: Array<{ text: string }> }>; turnComplete?: boolean };
+    }>;
+    expect(clientContents).toHaveLength(1);
+    expect(clientContents[0]?.clientContent.turns).toHaveLength(3);
+    expect(clientContents[0]?.clientContent.turns[0]?.role).toBe('user');
+    expect(clientContents[0]?.clientContent.turns[0]?.parts[0]?.text).toBe('what is this?');
+    expect(clientContents[0]?.clientContent.turnComplete).toBe(false);
+
+    lc.close();
+  });
+
+  it('does not send a replay batch when no replayTurns are configured', async () => {
+    mock = await startMockGemini();
+    process.env.GEMINI_LIVE_URL_OVERRIDE = mock.url;
+
+    const lc = new LiveClient({
+      config: makeConfig(),
+      sessionId: 's-no-replay',
+      onMessage: () => {},
+      onClose: () => {},
+      onOpen: () => {},
+      onError: () => {},
+    });
+    lc.connect();
+    await new Promise((res) => setTimeout(res, 150));
+
+    const clientContents = mock.received.filter((m) => 'clientContent' in m);
+    expect(clientContents).toHaveLength(0);
+
+    lc.close();
   });
 });

@@ -28,13 +28,14 @@ Both halves wrap a single class hierarchy (`AppHeartbeat`, `NativeHeartbeat`) sh
 
 **What we do.**
 
-- **Per-session state lives on the server.** `SessionManager` keys sessions by a client-generated `sessionId` (stored in browser `localStorage`). A reconnecting client passes `?sessionId=...` and the proxy finds the same `Session` object with its `resumptionHandle` already populated.
-- **We use Gemini's `sessionResumption` mechanism**, not our own context replay. On every reconnect, `LiveClient` sends `sessionResumption.handle` in the setup message and Gemini restores the model state directly. Tokens stay valid for ~2 hours after disconnect, and resumption chains support up to 24-hour continuity.
-- **We listen for `sessionResumptionUpdate`** messages from Gemini and only persist `newHandle` when `resumable:true`. This protects against stale handles and matches Gemini's contract.
-- **`goAway` is a gift, not a failure.** When Gemini signals an imminent forced disconnect, `UpstreamSupervisor.openReplacement()` opens a *parallel* connection with the latest handle. When the replacement's `setupComplete` arrives, we swap pointers and close the old one. The client never sees a gap.
+- **Per-session state lives on the server.** `SessionManager` keys sessions by a client-generated `sessionId` (stored in browser `localStorage`). A reconnecting client passes `?sessionId=...` and the proxy finds the same `Session` object with its `resumptionHandle`, transcript, and mode already populated.
+- **State is durable in Postgres.** Every `recordTurn` and resumption-handle update is written through to `sessions` / `turns` (`src/session/postgresStore.ts`). If the Node process is restarted or the in-memory entry is evicted, the next connect with the same `sessionId` rehydrates the `Session` from the DB (`session.loaded.from-db` in logs). See [docs/database.md](database.md) for setup.
+- **Hybrid context replay** when the upstream model doesn't support `sessionResumption`. On every fresh Gemini WS, `Session.buildSeedContext(N)` splits the transcript into a `summary` (older turns flattened, sent as `systemInstruction`) plus a `replay` array (the most recent `CONTEXT_REPLAY_TAIL_TURNS` turns, sent as one `clientContent` batch with `turnComplete:false` after `setupComplete`). The model gets both long-range context and live working context without needing Gemini's native resumption — which the `gemini-2.5-flash-native-audio-*` family rejects.
+- **Native `sessionResumption` is still wired** (gated behind `ENABLE_SESSION_RESUMPTION`) for the day we move to a model that supports it: `LiveClient.sendSetup` reads `sessionResumption.handle`, and `UpstreamSupervisor` listens for `sessionResumptionUpdate` and only persists `newHandle` when `resumable:true`. Both paths can coexist; the replay seed is harmless if Gemini also restores its own state.
+- **`goAway` is a gift, not a failure.** When Gemini signals an imminent forced disconnect, `UpstreamSupervisor.openReplacement()` opens a *parallel* connection (with seed + handle) and swaps pointers when its `setupComplete` arrives. The client never sees a gap.
 - **Client-side reconnect** uses jittered exponential backoff (250ms → 30s cap), bounded by `MAX_RECONNECT_ATTEMPTS`.
 
-**Code:** `src/reliability/reconnect.ts` (supervisor), `src/gemini/liveClient.ts` (setup with handle), `src/session/Session.ts` (persistence). Client-side in `client/app.js`.
+**Code:** `src/reliability/reconnect.ts` (supervisor + seed-context wiring), `src/gemini/liveClient.ts` (setup with handle, replay batch after `setupComplete`), `src/session/Session.ts` (`buildSeedContext`), `src/session/SessionManager.ts` (DB-backed rehydrate), `src/session/postgresStore.ts` (persistence). Client-side in `client/app.js`.
 
 ---
 

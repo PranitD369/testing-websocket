@@ -29,7 +29,7 @@ The same docs describe enabling sliding-window compression:
 
 Without this, long sessions get cut off when context fills up. With it, the model drops older turns once `triggerTokens` is crossed. The lab passes this on every setup (via `CONTEXT_COMPRESS_TRIGGER_TOKENS` env).
 
-## 4. `sessionResumption` is the only sane way to survive reconnects
+## 4. `sessionResumption` is the cleanest way to survive reconnects — when the model supports it
 
 From [Session management with Live API](https://ai.google.dev/gemini-api/docs/live-session):
 
@@ -38,9 +38,11 @@ From [Session management with Live API](https://ai.google.dev/gemini-api/docs/li
 - Pass the most recent `newHandle` as `sessionResumption.handle` in the *next* connection's setup to pick up where you left off.
 - Tokens valid ~2h after disconnect; resumption chains support up to 24h continuity.
 
-The lab persists the handle on the `Session` object server-side (NOT in the client) because the client doesn't need to know about it — it only needs its own `sessionId`. The server's lookup recovers the handle on reconnect.
+The lab persists the handle on the `Session` object server-side (NOT in the client) — the client only needs its own `sessionId`; the server's lookup recovers the handle on reconnect. The handle (and the full transcript) is also written through to Postgres so it survives process restarts, see [database.md](database.md).
 
 **Important contract:** only persist `newHandle` when `resumable:true`. Otherwise the handle may be invalid and the next setup will fail. `UpstreamSupervisor.handleMessage` enforces this.
+
+**Catch — the native-audio model doesn't accept it.** As of writing, `gemini-2.5-flash-native-audio-latest` closes the WS with code `1011` on the first turn whenever `sessionResumption` is present in the setup. So the lab keeps `ENABLE_SESSION_RESUMPTION=false` by default and falls back to a manual hybrid replay: `Session.buildSeedContext` produces a `summary` for `systemInstruction` plus a `replay` array sent as `clientContent` immediately after `setupComplete` (`LiveClient.sendReplayIfAny`). The model is seeded with the same context Gemini's own resumption would have restored. Flip `ENABLE_SESSION_RESUMPTION=true` and the two paths coexist when you move to a model that supports them.
 
 ## 5. `goAway` is a graceful warning, not an error
 

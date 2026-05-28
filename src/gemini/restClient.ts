@@ -1,6 +1,12 @@
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config.js';
+import type { Turn } from '../session/Session.js';
 import { logger } from '../util/logger.js';
+
+const SUMMARY_INSTRUCTION =
+  'You are summarizing a multimodal troubleshooting transcript so it can be re-injected as context when the live session resumes. ' +
+  'Preserve user-reported facts (equipment, symptoms, what they have tried), prior model analyses and recommendations, and any open questions or decisions left unresolved. ' +
+  'Output a single paragraph of 100-200 words. Do not include preamble like "Here is the summary".';
 
 export interface PhotoQuestionInput {
   photoBase64: string;
@@ -58,5 +64,32 @@ export class GeminiRestClient {
     const text = response.text ?? '';
     logger.debug({ modelVersion: response.modelVersion, len: text.length }, 'gemini.rest.responded');
     return { text, modelVersion: response.modelVersion };
+  }
+
+  /**
+   * Compress an older-turn transcript into a single paragraph for systemInstruction injection.
+   * Wrapped in Promise.race with the configured timeout so a slow REST call doesn't block reconnect;
+   * the SDK doesn't expose AbortSignal, so the underlying HTTP request may still complete in the
+   * background — we simply ignore its result if the timeout has already fired.
+   */
+  async summarizeTurns(turns: Turn[], opts: { timeoutMs: number }): Promise<string> {
+    const flattened = turns.map((t) => `${t.role}: ${t.text}`).join('\n');
+    const model = this.config.SUMMARY_MODEL;
+    const generation = this.client.models.generateContent({
+      model,
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: `${SUMMARY_INSTRUCTION}\n\nTranscript:\n${flattened}` }],
+        },
+      ],
+    });
+    const result = await Promise.race([
+      generation.then((r) => r.text ?? ''),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('summary-timeout')), opts.timeoutMs),
+      ),
+    ]);
+    return result.trim();
   }
 }

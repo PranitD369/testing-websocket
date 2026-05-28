@@ -10,6 +10,8 @@ interface SessionRow {
   last_activity: Date;
   resumption_handle: string | null;
   mode: string;
+  summary: string | null;
+  summary_up_to_count: number;
 }
 
 interface TurnRow {
@@ -23,7 +25,8 @@ export class PostgresSessionStore implements SessionStore {
 
   async load(id: string): Promise<SessionSnapshot | null> {
     const sessionRes = await this.pool.query<SessionRow>(
-      'SELECT id, created_at, last_activity, resumption_handle, mode FROM sessions WHERE id = $1',
+      `SELECT id, created_at, last_activity, resumption_handle, mode, summary, summary_up_to_count
+       FROM sessions WHERE id = $1`,
       [id],
     );
     const row = sessionRes.rows[0];
@@ -47,13 +50,15 @@ export class PostgresSessionStore implements SessionStore {
       resumptionHandle: row.resumption_handle ?? undefined,
       mode: row.mode as Mode,
       transcript,
+      summary: row.summary ?? undefined,
+      summaryUpToCount: row.summary_up_to_count,
     };
   }
 
   async save(session: Session): Promise<void> {
     await this.pool.query(
-      `INSERT INTO sessions (id, created_at, last_activity, resumption_handle, mode)
-       VALUES ($1, to_timestamp($2 / 1000.0), to_timestamp($3 / 1000.0), $4, $5)
+      `INSERT INTO sessions (id, created_at, last_activity, resumption_handle, mode, summary, summary_up_to_count)
+       VALUES ($1, to_timestamp($2 / 1000.0), to_timestamp($3 / 1000.0), $4, $5, $6, $7)
        ON CONFLICT (id) DO UPDATE SET
          last_activity = EXCLUDED.last_activity,
          resumption_handle = EXCLUDED.resumption_handle,
@@ -64,6 +69,8 @@ export class PostgresSessionStore implements SessionStore {
         session.lastActivity,
         session.resumptionHandle ?? null,
         session.mode,
+        session.summaryCache?.text ?? null,
+        session.summaryCache?.upToCount ?? 0,
       ],
     );
   }
@@ -87,6 +94,17 @@ export class PostgresSessionStore implements SessionStore {
       ]);
     } catch (err) {
       logger.warn({ err: (err as Error).message, sessionId }, 'db.saveHandle.failed');
+    }
+  }
+
+  async saveSummary(sessionId: string, text: string, upToCount: number): Promise<void> {
+    try {
+      await this.pool.query(
+        'UPDATE sessions SET summary = $1, summary_up_to_count = $2 WHERE id = $3',
+        [text, upToCount, sessionId],
+      );
+    } catch (err) {
+      logger.warn({ err: (err as Error).message, sessionId }, 'db.saveSummary.failed');
     }
   }
 

@@ -8,6 +8,8 @@ export interface SessionSnapshot {
   resumptionHandle?: string;
   mode: Mode;
   transcript: Turn[];
+  summary?: string;
+  summaryUpToCount: number;
 }
 
 /**
@@ -20,6 +22,7 @@ export interface SessionStore {
   save(session: Session): Promise<void>;
   appendTurn(sessionId: string, turn: Turn): Promise<void>;
   saveHandle(sessionId: string, handle: string | undefined): Promise<void>;
+  saveSummary(sessionId: string, text: string, upToCount: number): Promise<void>;
   touch(sessionId: string, at: number): Promise<void>;
   remove(id: string): Promise<void>;
   removeExpired(beforeMs: number): Promise<number>;

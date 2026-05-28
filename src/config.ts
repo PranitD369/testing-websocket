@@ -23,7 +23,10 @@ const schema = z.object({
   DATABASE_URL: z.string().url().optional(),
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
   // Hybrid context replay: how many tail turns to replay verbatim; everything older is summarized.
-  CONTEXT_REPLAY_TAIL_TURNS: z.coerce.number().int().nonnegative().default(3),
+  CONTEXT_REPLAY_TAIL_TURNS: z.coerce.number().int().nonnegative().default(10),
+  // LLM summary for the older portion of the transcript. Timeout caps reconnect latency.
+  SUMMARY_TIMEOUT_MS: z.coerce.number().int().positive().default(2500),
+  SUMMARY_MODEL: z.string().default('gemini-2.5-flash'),
 });
 
 export type Config = z.infer<typeof schema>;

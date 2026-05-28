@@ -8,6 +8,8 @@ import { loadConfig } from './config.js';
 import { SessionManager } from './session/SessionManager.js';
 import { MemorySessionStore } from './session/memoryStore.js';
 import { PostgresSessionStore } from './session/postgresStore.js';
+import { GeminiSummarizer } from './session/summarizer.js';
+import { GeminiRestClient } from './gemini/restClient.js';
 import type { SessionStore } from './session/store.js';
 import { initPool, closePool } from './db/pool.js';
 import { initDb } from './db/init.js';
@@ -31,6 +33,8 @@ async function main(): Promise<void> {
   }
 
   const sessions = new SessionManager(config.SESSION_TTL_HOURS, store);
+  const restClient = new GeminiRestClient(config);
+  const summarizer = new GeminiSummarizer(restClient, config.SUMMARY_TIMEOUT_MS);
 
   const app = Fastify({ logger: false, bodyLimit: 25 * 1024 * 1024 });
 
@@ -47,7 +51,7 @@ async function main(): Promise<void> {
 
   app.get('/health', async () => ({ ok: true, sessions: sessions.size(), db: usingDb }));
 
-  await registerWsRoute(app, { config, sessions });
+  await registerWsRoute(app, { config, sessions, summarizer });
   await registerFallbackRoute(app, { config, sessions });
 
   try {

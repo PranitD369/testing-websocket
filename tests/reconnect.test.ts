@@ -1,9 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { startMockGemini, type MockGeminiHandle } from './fixtures/mockGemini.js';
 import { Session } from '../src/session/Session.js';
 import { UpstreamSupervisor } from '../src/reliability/reconnect.js';
 import { LiveClient } from '../src/gemini/liveClient.js';
+import type { Summarizer } from '../src/session/summarizer.js';
 import type { Config } from '../src/config.js';
+
+const stubSummarizer: Summarizer = {
+  async summarize() {
+    return 'STUBBED SUMMARY';
+  },
+};
 
 function makeConfig(): Config {
   return {
@@ -23,7 +30,9 @@ function makeConfig(): Config {
     ENABLE_SESSION_RESUMPTION: false,
     ENABLE_CONTEXT_COMPRESSION: false,
     DB_POOL_MAX: 10,
-    CONTEXT_REPLAY_TAIL_TURNS: 3,
+    CONTEXT_REPLAY_TAIL_TURNS: 10,
+    SUMMARY_TIMEOUT_MS: 2500,
+    SUMMARY_MODEL: 'mock-rest',
   } as Config;
 }
 
@@ -41,6 +50,7 @@ describe('UpstreamSupervisor (logic)', () => {
     const sup = new UpstreamSupervisor({
       config,
       session,
+      summarizer: stubSummarizer,
       onMessage: () => {},
       onGiveUp: () => {},
       onReady: () => {},
@@ -126,6 +136,45 @@ describe('LiveClient context replay', () => {
     expect(clientContents[0]?.clientContent.turnComplete).toBe(false);
 
     lc.close();
+  });
+
+  it('UpstreamSupervisor seeds setup with LLM summary and replays 10 tail turns', async () => {
+    mock = await startMockGemini();
+    process.env.GEMINI_LIVE_URL_OVERRIDE = mock.url;
+
+    const session = new Session('s-supervisor');
+    for (let i = 0; i < 12; i++) {
+      session.recordTurn(i % 2 === 0 ? 'user' : 'model', `t${i}`);
+    }
+
+    const sup = new UpstreamSupervisor({
+      config: makeConfig(),
+      session,
+      summarizer: stubSummarizer,
+      onMessage: () => {},
+      onGiveUp: () => {},
+      onReady: () => {},
+    });
+    sup.start();
+
+    // Allow async buildLiveOpts + connect + setupComplete + replay batch to round-trip.
+    await new Promise((res) => setTimeout(res, 200));
+
+    const setup = mock.receivedSetups[0] as
+      | { setup: { systemInstruction?: { parts: Array<{ text: string }> } } }
+      | undefined;
+    expect(setup?.setup.systemInstruction?.parts[0]?.text).toBe('STUBBED SUMMARY');
+
+    const replays = mock.received.filter((m) => 'clientContent' in m) as Array<{
+      clientContent: { turns: Array<{ parts: Array<{ text: string }> }>; turnComplete?: boolean };
+    }>;
+    expect(replays).toHaveLength(1);
+    expect(replays[0]?.clientContent.turns).toHaveLength(10);
+    expect(replays[0]?.clientContent.turns[0]?.parts[0]?.text).toBe('t2');
+    expect(replays[0]?.clientContent.turns[9]?.parts[0]?.text).toBe('t11');
+    expect(replays[0]?.clientContent.turnComplete).toBe(false);
+
+    sup.stop();
   });
 
   it('does not send a replay batch when no replayTurns are configured', async () => {

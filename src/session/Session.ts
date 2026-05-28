@@ -1,4 +1,6 @@
 import type { Mode } from '../gemini/liveTypes.js';
+import type { Summarizer } from './summarizer.js';
+import { logger } from '../util/logger.js';
 
 export interface Turn {
   role: 'user' | 'model';
@@ -18,11 +20,21 @@ export interface SessionHooks {
   onTurn?: (turn: Turn) => void;
   onHandleChange?: (handle: string | undefined) => void;
   onTouch?: (at: number) => void;
+  onSummaryChange?: (text: string, upToCount: number) => void;
 }
 
 export interface SeedContext {
   summary: string;
   replay: Turn[];
+}
+
+export interface SummaryCache {
+  text: string;
+  upToCount: number;
+}
+
+function rawConcat(turns: Turn[]): string {
+  return 'Earlier conversation summary:\n' + turns.map((t) => `${t.role}: ${t.text}`).join('\n');
 }
 
 export class Session {
@@ -39,6 +51,8 @@ export class Session {
     lastClientPingAt: 0,
     lastClientPongAt: 0,
   };
+  summaryCache?: SummaryCache;
+  private summaryInFlight: Promise<string> | null = null;
   private hooks: SessionHooks = {};
 
   constructor(id: string, createdAt: number = Date.now()) {
@@ -55,6 +69,11 @@ export class Session {
     if (handle === this.resumptionHandle) return;
     this.resumptionHandle = handle;
     this.hooks.onHandleChange?.(handle);
+  }
+
+  setSummary(text: string, upToCount: number): void {
+    this.summaryCache = { text, upToCount };
+    this.hooks.onSummaryChange?.(text, upToCount);
   }
 
   touch(): void {
@@ -79,12 +98,14 @@ export class Session {
 
   /**
    * Hybrid context-replay seed for a fresh upstream connection.
-   * - `summary`: every turn older than the tail, flattened. Sent as systemInstruction.
+   * - `summary`: every turn older than the tail, compressed by the LLM. Cached on the
+   *   Session and persisted; reused on subsequent reconnects until new older turns accrue.
    * - `replay`: the most recent `tailCount` turns, sent as a clientContent batch right
    *   after setupComplete so the model has live working context.
-   * Used when the model doesn't support Gemini's native `sessionResumption` mechanism.
+   * If the summarizer throws or times out, falls back to a raw `role: text` concat so
+   * reconnect is never blocked indefinitely.
    */
-  buildSeedContext(tailCount: number): SeedContext {
+  async buildSeedContext(tailCount: number, summarizer: Summarizer): Promise<SeedContext> {
     if (tailCount <= 0 || this.transcript.length === 0) {
       return { summary: '', replay: [] };
     }
@@ -94,8 +115,50 @@ export class Session {
     const olderCount = this.transcript.length - tailCount;
     const older = this.transcript.slice(0, olderCount);
     const replay = this.transcript.slice(olderCount);
-    const summary =
-      'Earlier conversation summary:\n' + older.map((t) => `${t.role}: ${t.text}`).join('\n');
-    return { summary, replay };
+
+    if (this.summaryCache && this.summaryCache.upToCount === olderCount) {
+      logger.info(
+        { sessionId: this.id, upToCount: olderCount },
+        'summary.cache.hit',
+      );
+      return { summary: this.summaryCache.text, replay };
+    }
+
+    // Dedupe concurrent reconnects on the same session.
+    if (this.summaryInFlight) {
+      try {
+        const text = await this.summaryInFlight;
+        return { summary: text, replay };
+      } catch {
+        // Fall through to raw concat below.
+      }
+    }
+
+    const started = Date.now();
+    logger.info({ sessionId: this.id, older: olderCount }, 'summary.compute.start');
+    this.summaryInFlight = summarizer.summarize(older);
+    try {
+      const text = await this.summaryInFlight;
+      this.setSummary(text, olderCount);
+      logger.info(
+        { sessionId: this.id, chars: text.length, latencyMs: Date.now() - started },
+        'summary.compute.ok',
+      );
+      return { summary: text, replay };
+    } catch (err) {
+      const message = (err as Error).message;
+      const latencyMs = Date.now() - started;
+      if (message === 'summary-timeout') {
+        logger.warn(
+          { sessionId: this.id, latencyMs, fallback: 'raw-concat' },
+          'summary.compute.timeout',
+        );
+      } else {
+        logger.warn({ sessionId: this.id, err: message, latencyMs }, 'summary.compute.failed');
+      }
+      return { summary: rawConcat(older), replay };
+    } finally {
+      this.summaryInFlight = null;
+    }
   }
 }

@@ -16,3 +16,6 @@ CREATE TABLE IF NOT EXISTS turns (
 
 CREATE INDEX IF NOT EXISTS idx_turns_session_at ON turns(session_id, at);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity);
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary_up_to_count INT NOT NULL DEFAULT 0;

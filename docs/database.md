@@ -39,7 +39,14 @@ CREATE TABLE IF NOT EXISTS turns (
 
 CREATE INDEX IF NOT EXISTS idx_turns_session_at        ON turns(session_id, at);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_activity  ON sessions(last_activity);
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary              TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary_up_to_count  INT NOT NULL DEFAULT 0;
 ```
+
+The two extra columns hold the LLM-generated summary of older turns and the
+count of turns it covers (used as a staleness check — see "Hybrid context replay"
+below).
 
 ## Local Postgres (Docker)
 
@@ -102,15 +109,21 @@ in the logs and the model's reply will reference the earlier turns.
    - If the session is already in memory, returns it.
    - Otherwise calls `store.load(id)`. On hit: rebuilds the `Session` with
      transcript + handle + last-activity; logs `session.loaded.from-db`.
-3. `UpstreamSupervisor` opens a new Gemini WS. Before connect, it calls
-   `Session.buildSeedContext(CONTEXT_REPLAY_TAIL_TURNS)` which returns:
-   - `summary`: older turns flattened into a single string. Sent as
-     `systemInstruction` in the setup message.
-   - `replay`: the most recent N turns, sent as one `clientContent` batch with
-     `turnComplete:false` right after `setupComplete`.
-4. The model now has both long-range context (summary) and live working context
-   (replay) without depending on Gemini's `sessionResumption` feature — which
-   the current `gemini-2.5-flash-native-audio-*` family rejects.
+3. `UpstreamSupervisor` opens a new Gemini WS. Before connect, it `await`s
+   `Session.buildSeedContext(CONTEXT_REPLAY_TAIL_TURNS, summarizer)` which returns:
+   - `summary`: older turns compressed by **Gemini REST** (`SUMMARY_MODEL`) into a
+     single paragraph. Cached on the `Session` and persisted to
+     `sessions.summary` so the next reconnect re-uses it — no LLM call until
+     more turns roll past the tail. Sent as `systemInstruction` in setup.
+   - `replay`: the most recent `CONTEXT_REPLAY_TAIL_TURNS` turns (default 10),
+     sent as one `clientContent` batch with `turnComplete:false` right after
+     `setupComplete`.
+4. The model now has both long-range context (LLM summary) and live working
+   context (replay) without depending on Gemini's `sessionResumption` feature —
+   which the current `gemini-2.5-flash-native-audio-*` family rejects.
+5. If the summarizer times out (`SUMMARY_TIMEOUT_MS`, default 2.5s) or errors,
+   `buildSeedContext` falls back to a raw `role: text` concat of older turns so
+   reconnect never blocks indefinitely.
 
 ## Operational notes
 

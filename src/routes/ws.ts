@@ -1,12 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { Bridge } from '../proxy/bridge.js';
 import type { SessionManager } from '../session/SessionManager.js';
+import type { Summarizer } from '../session/summarizer.js';
 import type { Config } from '../config.js';
 import { logger } from '../util/logger.js';
 
 export interface WsRouteDeps {
   config: Config;
   sessions: SessionManager;
+  summarizer: Summarizer;
 }
 
 /**
@@ -47,6 +49,7 @@ export async function registerWsRoute(app: FastifyInstance, deps: WsRouteDeps): 
     const bridge = new Bridge({
       config: deps.config,
       session,
+      summarizer: deps.summarizer,
       clientWs: socket as unknown as import('ws').WebSocket,
       inject,
     });

@@ -4,6 +4,7 @@ import { AppHeartbeat } from '../reliability/heartbeat.js';
 import { BandwidthMonitor } from '../reliability/bandwidthMonitor.js';
 import { DegradationController } from '../reliability/degradation.js';
 import type { Session } from '../session/Session.js';
+import type { Summarizer } from '../session/summarizer.js';
 import type { Config } from '../config.js';
 import type { ServerMessage } from '../gemini/liveTypes.js';
 import { logger } from '../util/logger.js';
@@ -11,6 +12,7 @@ import { logger } from '../util/logger.js';
 export interface BridgeOptions {
   config: Config;
   session: Session;
+  summarizer: Summarizer;
   clientWs: WebSocket;
   /** Optional debug toggles via query params (?inject=...) */
   inject?: Set<string>;
@@ -113,6 +115,7 @@ export class Bridge {
     this.upstream = new UpstreamSupervisor({
       config: this.opts.config,
       session: this.opts.session,
+      summarizer: this.opts.summarizer,
       onMessage: (msg, raw) => this.handleUpstreamMessage(msg, raw),
       onReady: () => {
         this.sendClient({ type: 'upstreamReady' });

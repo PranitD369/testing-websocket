@@ -30,16 +30,15 @@ export class SessionManager {
       }
       const snap = await this.store.load(id);
       if (snap) {
-        const rehydrated = new Session(snap.id, snap.createdAt);
-        rehydrated.lastActivity = snap.lastActivity;
-        rehydrated.resumptionHandle = snap.resumptionHandle;
-        rehydrated.mode = snap.mode;
-        rehydrated.transcript = snap.transcript;
-        this.attachHooks(rehydrated);
+        const rehydrated = this.fromSnapshot(snap);
         this.sessions.set(snap.id, rehydrated);
         rehydrated.touch();
         logger.info(
-          { sessionId: snap.id, turns: snap.transcript.length },
+          {
+            sessionId: snap.id,
+            turns: snap.transcript.length,
+            summaryUpToCount: snap.summaryUpToCount,
+          },
           'session.loaded.from-db',
         );
         return rehydrated;
@@ -83,15 +82,23 @@ export class SessionManager {
     }
     const snap = await this.store.load(id);
     if (!snap) return undefined;
-    const rehydrated = new Session(snap.id, snap.createdAt);
-    rehydrated.lastActivity = snap.lastActivity;
-    rehydrated.resumptionHandle = snap.resumptionHandle;
-    rehydrated.mode = snap.mode;
-    rehydrated.transcript = snap.transcript;
-    this.attachHooks(rehydrated);
+    const rehydrated = this.fromSnapshot(snap);
     this.sessions.set(snap.id, rehydrated);
     rehydrated.touch();
     return rehydrated;
+  }
+
+  private fromSnapshot(snap: import('./store.js').SessionSnapshot): Session {
+    const s = new Session(snap.id, snap.createdAt);
+    s.lastActivity = snap.lastActivity;
+    s.resumptionHandle = snap.resumptionHandle;
+    s.mode = snap.mode;
+    s.transcript = snap.transcript;
+    if (snap.summary && snap.summaryUpToCount > 0) {
+      s.summaryCache = { text: snap.summary, upToCount: snap.summaryUpToCount };
+    }
+    this.attachHooks(s);
+    return s;
   }
 
   async remove(id: string): Promise<void> {
@@ -113,6 +120,9 @@ export class SessionManager {
       },
       onTouch: (at) => {
         void this.store.touch(session.id, at);
+      },
+      onSummaryChange: (text, upToCount) => {
+        void this.store.saveSummary(session.id, text, upToCount);
       },
     });
   }

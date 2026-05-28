@@ -1,5 +1,6 @@
 import { LiveClient, type LiveClientOptions } from '../gemini/liveClient.js';
 import type { Session } from '../session/Session.js';
+import type { Summarizer } from '../session/summarizer.js';
 import type { ServerMessage } from '../gemini/liveTypes.js';
 import { logger } from '../util/logger.js';
 import type { Config } from '../config.js';
@@ -7,6 +8,7 @@ import type { Config } from '../config.js';
 export interface UpstreamSupervisorOptions {
   config: Config;
   session: Session;
+  summarizer: Summarizer;
   /** Called for every Gemini message after upstream is ready. */
   onMessage: (msg: ServerMessage, raw: Buffer | string) => void;
   /** Called when supervisor gives up (max attempts exhausted). */
@@ -33,7 +35,7 @@ export class UpstreamSupervisor {
   constructor(private readonly opts: UpstreamSupervisorOptions) {}
 
   start(): void {
-    this.openCurrent();
+    void this.openCurrent();
   }
 
   /** Send a payload upstream (drops silently if not ready). */
@@ -58,8 +60,11 @@ export class UpstreamSupervisor {
     this.replacement = null;
   }
 
-  private buildLiveOpts(extra: Partial<LiveClientOptions>): LiveClientOptions {
-    const seed = this.opts.session.buildSeedContext(this.opts.config.CONTEXT_REPLAY_TAIL_TURNS);
+  private async buildLiveOpts(extra: Partial<LiveClientOptions>): Promise<LiveClientOptions> {
+    const seed = await this.opts.session.buildSeedContext(
+      this.opts.config.CONTEXT_REPLAY_TAIL_TURNS,
+      this.opts.summarizer,
+    );
     if (seed.summary || seed.replay.length > 0) {
       logger.info(
         {
@@ -84,33 +89,41 @@ export class UpstreamSupervisor {
     };
   }
 
-  private openCurrent(): void {
+  private async openCurrent(): Promise<void> {
     if (this.stopped) return;
     this.attempts += 1;
-    const lc = new LiveClient(
-      this.buildLiveOpts({
+    try {
+      const liveOpts = await this.buildLiveOpts({
         onOpen: () => {
           logger.info({ sessionId: this.opts.session.id, attempts: this.attempts }, 'upstream.open');
         },
-      }),
-    );
-    this.current = lc;
-    lc.connect();
+      });
+      if (this.stopped) return;
+      const lc = new LiveClient(liveOpts);
+      this.current = lc;
+      lc.connect();
+    } catch (err) {
+      logger.error(
+        { sessionId: this.opts.session.id, err: (err as Error).message },
+        'upstream.open.failed',
+      );
+      this.handleClose(0, 'open-failed');
+    }
   }
 
   /** Proactively open a replacement upstream (on goAway) and swap once it's ready. */
-  private openReplacement(): void {
+  private async openReplacement(): Promise<void> {
     if (this.stopped || this.replacement) return;
     logger.info({ sessionId: this.opts.session.id }, 'upstream.replacement.opening');
-    const repl = new LiveClient(
-      this.buildLiveOpts({
+    let repl: LiveClient | null = null;
+    try {
+      const liveOpts = await this.buildLiveOpts({
         onOpen: () => {},
         onMessage: (msg, raw) => {
-          // Forward replacement messages too (it will replace current shortly).
           if ('setupComplete' in msg) {
             logger.info({ sessionId: this.opts.session.id }, 'upstream.replacement.ready.swap');
             const old = this.current;
-            this.current = repl;
+            if (repl) this.current = repl;
             this.replacement = null;
             old?.close(1000, 'replaced');
             this.opts.onReady();
@@ -119,15 +132,22 @@ export class UpstreamSupervisor {
           this.handleMessage(msg, raw);
         },
         onClose: (code, reason) => {
-          if (this.replacement === repl) {
+          if (repl && this.replacement === repl) {
             logger.warn({ code, reason }, 'upstream.replacement.closed-before-swap');
             this.replacement = null;
           }
         },
-      }),
-    );
-    this.replacement = repl;
-    repl.connect();
+      });
+      if (this.stopped) return;
+      repl = new LiveClient(liveOpts);
+      this.replacement = repl;
+      repl.connect();
+    } catch (err) {
+      logger.warn(
+        { sessionId: this.opts.session.id, err: (err as Error).message },
+        'upstream.replacement.open.failed',
+      );
+    }
   }
 
   private handleMessage(msg: ServerMessage, raw: Buffer | string): void {
@@ -145,7 +165,7 @@ export class UpstreamSupervisor {
         { sessionId: this.opts.session.id, timeLeft: msg.goAway.timeLeft },
         'upstream.goAway',
       );
-      this.openReplacement();
+      void this.openReplacement();
     }
     this.opts.onMessage(msg, raw);
   }
@@ -160,7 +180,7 @@ export class UpstreamSupervisor {
     }
     const delay = this.backoffMs();
     logger.info({ code, reason, delay, nextAttempt: this.attempts + 1 }, 'upstream.reconnect.scheduled');
-    this.backoffTimer = setTimeout(() => this.openCurrent(), delay);
+    this.backoffTimer = setTimeout(() => void this.openCurrent(), delay);
     this.backoffTimer.unref?.();
   }
 

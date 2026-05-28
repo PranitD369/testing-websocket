@@ -23,6 +23,8 @@ export class MemorySessionStore implements SessionStore {
       resumptionHandle: session.resumptionHandle,
       mode: session.mode,
       transcript: [...session.transcript],
+      summary: session.summaryCache?.text,
+      summaryUpToCount: session.summaryCache?.upToCount ?? 0,
     });
   }
 
@@ -36,6 +38,13 @@ export class MemorySessionStore implements SessionStore {
     const snap = this.data.get(sessionId);
     if (!snap) return;
     snap.resumptionHandle = handle;
+  }
+
+  async saveSummary(sessionId: string, text: string, upToCount: number): Promise<void> {
+    const snap = this.data.get(sessionId);
+    if (!snap) return;
+    snap.summary = text;
+    snap.summaryUpToCount = upToCount;
   }
 
   async touch(sessionId: string, at: number): Promise<void> {

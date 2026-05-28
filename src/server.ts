@@ -4,6 +4,7 @@ import multipart from '@fastify/multipart';
 import staticPlugin from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { loadConfig } from './config.js';
 import { SessionManager } from './session/SessionManager.js';
 import { MemorySessionStore } from './session/memoryStore.js';
@@ -48,6 +49,27 @@ async function main(): Promise<void> {
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const clientDir = resolve(__dirname, '..', 'client');
   await app.register(staticPlugin, { root: clientDir, prefix: '/' });
+
+  // The React PWA build (web/dist) is served under /app. SPA fallback rewrites unknown
+  // sub-paths to index.html so client-side navigation works after page reload.
+  const webDist = resolve(__dirname, '..', 'web', 'dist');
+  if (existsSync(webDist)) {
+    await app.register(staticPlugin, {
+      root: webDist,
+      prefix: '/app/',
+      decorateReply: false,
+    });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.url.startsWith('/app/') && req.method === 'GET') {
+        reply.sendFile('index.html', webDist);
+        return;
+      }
+      reply.code(404).send({ error: 'not-found' });
+    });
+    logger.info({ webDist }, 'pwa.served-at /app');
+  } else {
+    logger.warn({ webDist }, 'pwa.dist-not-found run "npm run build" inside web/ to enable /app');
+  }
 
   app.get('/health', async () => ({ ok: true, sessions: sessions.size(), db: usingDb }));
 
